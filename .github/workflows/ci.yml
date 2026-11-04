@@ -1,0 +1,21 @@
+name: Swift
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test-and-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unit tests
+        run: swift test --disable-xctest
+      - name: Release build
+        run: swift build -c release
+      - name: Package app
+        run: swift run --skip-build -c release BundleApp
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Notification-Character-macOS
+          path: dist/Notification-Character.zip
