@@ -42,8 +42,30 @@ swift test --disable-xctest \
 
 ## 검증 범위
 
-- 14개 Swift Testing 테스트: 세 모드, 읽음/닫기/재감지, 조회 실패 복구, 오래된 값, 적응형 대기 및 화면 경계 243조합
+- Swift Testing 테스트: 세 모드, 읽음/닫기/재감지, 조회 실패 복구, 오래된 값, 적응형 대기 및 화면 경계 243조합, SVG 검증과 파일 보관/복구
 - `--smoke-test`: 실제 AppKit 창을 가짜 배지로 표시/숨김, 비활성 창과 클릭 통과 속성, 애니메이션 타이머
 - `--inspect-dock`: 현재 실행 환경의 실제 Dock 조회 결과. `permission`이면 해당 실행 주체에 권한이 필요함
 
 실제 메신저의 새 메시지 발생·읽음 전환과 다중 모니터/절전 복귀는 권한 허용 후 실사용 확인이 필요합니다. Dock 배지 자체가 변하지 않는 추가 알림은 이 방식으로 구별할 수 없습니다.
+
+캐릭터 파일 렌더링을 확인하려면 그래픽 세션에서 다음을 실행합니다.
+
+```console
+"dist/Notification Character.app/Contents/MacOS/NotificationCharacter" --asset-smoke-test examples/mint-friend.svg
+"dist/Notification Character.app/Contents/MacOS/NotificationCharacter" --preview /tmp/character.png --character examples/mint-friend.svg
+```
+
+이미지 선택은 `NSOpenPanel`, SVG 렌더링은 AppKit `NSImage`를 사용합니다. WebKit, 셸, 원격 변환 서비스를 사용하지 않습니다. 실제 데이터는 `~/Library/Application Support/NotificationCharacter/Characters/`에 저장되며 Git에 포함되지 않습니다.
+
+GIF는 ImageIO/AppKit 프레임 정보를 사용해 재생하고, 동영상은 AVFoundation의 `AVQueuePlayer`/`AVPlayerLooper`로 반복합니다. 모든 동영상은 무음이며 숨김 시 멈춥니다. 영상 정보는 비동기로 읽어 파일 선택 중 UI가 멈추지 않게 했습니다.
+
+흰 배경 제거는 가장자리와 연결된 밝은 픽셀을 flood fill로 찾습니다. 닫힌 내부의 흰 부분은 유지하고 경계의 흰색 혼합을 줄입니다. 영상은 `AVPlayerItemVideoOutput`으로 프레임을 받아 최대 384px로 처리하고, 숨김 중에는 처리하지 않습니다. 복잡한 배경을 대상으로 하는 인물 분할 모델은 아닙니다.
+
+실제 동영상 재생·배경 제거와 GIF 프레임 전환 확인:
+
+```console
+"dist/Notification Character.app/Contents/MacOS/NotificationCharacter" --media-smoke-test /path/to/character.mp4
+"dist/Notification Character.app/Contents/MacOS/NotificationCharacter" --preview /tmp/cutout.png --character /path/to/character.mp4 --remove-white-background
+```
+
+위 테스트는 임시 폴더에서 생성한 2프레임 GIF의 실제 렌더링 색상 변화와 반복, 동영상의 실제 재생·반복 횟수·무음·투명 프레임·정지를 검사합니다. 사용자 설정은 바꾸지 않습니다.

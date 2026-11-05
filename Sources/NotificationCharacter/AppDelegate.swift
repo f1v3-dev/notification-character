@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import NotificationCore
+import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: CatPanel!
@@ -22,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusDescription = "Dock 배지 확인 중"
     private var observers: [NSObjectProtocol] = []
     private var frames = 0
+    private var characterPicker: NSOpenPanel?
+    private var characterLoadTask: Task<Void, Never>?
+    private lazy var characterFiles = CharacterFileStore(directory: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/NotificationCharacter/Characters"))
     private var testing: Bool { CommandLine.arguments.contains("--smoke-test") }
     private lazy var settings: UserDefaults = testing ? UserDefaults(suiteName: "NotificationCharacter.Test.\(UUID().uuidString)")! : .standard
     private let intervals: [TimeInterval] = [0.3, 0.5, 1, 2, 5]
@@ -47,11 +51,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         cat = CatView(frame: NSRect(x: 0, y: 0, width: size, height: size))
         cat.autoresizingMask = [.width, .height]; panel.contentView = cat
+        cat.removeWhiteBackground = settings.bool(forKey: "removeWhiteBackground")
+        if !testing, settings.bool(forKey: "useImportedCharacter"), let url = characterFiles.selectedURL {
+            loadCharacter(url: url, copy: false, preview: false)
+        }
         policy = NotificationPolicy(mode: AlertMode(rawValue: settings.string(forKey: "alertMode") ?? "") ?? .unread)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "알림 고양이")
+        statusItem.button?.image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "알림 친구")
         statusItem.button?.imagePosition = .imageLeading
-        snapToCursor(); refresh(now: Date().timeIntervalSince1970); scheduleTimer(visible: false)
+        if !testing && CommandLine.arguments.contains("--show-preview") { previewUntil = Date().timeIntervalSince1970 + 10 }
+        snapToCursor(); refresh(now: Date().timeIntervalSince1970); scheduleTimer(visible: panel.isVisible)
         if testing { runWindowSmokeTest(); return }
         startMonitoring()
         let center = NSWorkspace.shared.notificationCenter
@@ -88,7 +97,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if show && !panel.isVisible { snapToCursor(); panel.orderFrontRegardless(); scheduleTimer(visible: true) }
         else if !show && panel.isVisible { panel.orderOut(nil); scheduleTimer(visible: false) }
         cat.hasNotification = policy.visible
-        statusItem.button?.toolTip = "알림 고양이 — \(statusDescription)"
+        cat.isPlaybackActive = show
+        statusItem.button?.toolTip = "알림 친구 — \(statusDescription)"
         let signature = "\(show)|\(policy.mode.rawValue)|\(statusDescription)|\(String(describing: snapshot?.apps))|\(policy.displayedApps)"
         if signature != lastPresentation { lastPresentation = signature; updateMenuBar(); rebuildMenu() }
     }
@@ -120,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             cat.look = max(-1.5, min(1.5, (target.x - origin.x) / 40))
             cat.moving = distance > 6 || now - lastMovement < 0.15
         } else { cat.moving = false }
-        cat.phase += min(dt, 0.1); cat.needsDisplay = true
+        cat.advanceMedia(dt: dt); cat.phase += min(dt, 0.1); cat.needsDisplay = true
     }
     private func updateMenuBar() {
         let text = NSMutableAttributedString(string: "")
@@ -141,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private func rebuildMenu() {
         let menu = NSMenu()
-        menu.addItem(item("알림 고양이")); menu.addItem(item(statusDescription)); menu.addItem(.separator())
+        menu.addItem(item("알림 친구")); menu.addItem(item(statusDescription)); menu.addItem(.separator())
         for (index, app) in MessengerApp.allCases.enumerated() {
             let record = snapshot?.apps[app]
             let status: String
@@ -172,7 +182,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("10초 미리보기", #selector(preview)))
         menu.addItem(item(paused ? "다시 따라오기" : "여기서 쉬기", #selector(togglePause)))
         menu.addItem(item(hidden ? "알림 캐릭터 켜기" : "알림 캐릭터 끄기", #selector(toggleHidden)))
-        let sizeItem = item("고양이 크기"), sizes = NSMenu()
+        let character = item("캐릭터 파일"), characterMenu = NSMenu()
+        let currentName = cat.characterImage == nil ? "기본 고양이" : characterFiles.selection?.originalName ?? "내 캐릭터"
+        characterMenu.addItem(item("현재: " + currentName)); characterMenu.addItem(.separator())
+        characterMenu.addItem(item("이미지 / GIF / 동영상 불러오기…", #selector(importCharacter)))
+        let restore = item("기본 고양이 사용", #selector(useDefaultCharacter)); restore.state = cat.characterImage == nil ? .on : .off
+        characterMenu.addItem(restore)
+        if characterFiles.selection != nil { characterMenu.addItem(item("마지막에 불러온 캐릭터 사용", #selector(useImportedCharacter))) }
+        characterMenu.addItem(.separator())
+        let cutout = item("MP4·MOV 흰 배경 제거", #selector(toggleWhiteBackground))
+        cutout.state = cat.removeWhiteBackground ? .on : .off; characterMenu.addItem(cutout)
+        character.submenu = characterMenu; menu.addItem(character)
+        let sizeItem = item("캐릭터 크기"), sizes = NSMenu()
         for (label, value) in [("작게", 72), ("보통", 96), ("크게", 120)] {
             let entry = item(label, #selector(changeSize(_:))); entry.tag = value
             entry.state = Int(panel.frame.width) == value ? .on : .off; sizes.addItem(entry)
@@ -189,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let counts = item("메뉴바 배지를 숫자로 표시", #selector(toggleCounts)); counts.state = settings.bool(forKey: "showCounts") ? .on : .off; menu.addItem(counts)
         menu.addItem(.separator()); menu.addItem(item("다시 감지", #selector(rescan)))
         menu.addItem(item("손쉬운 사용 권한 설정…", #selector(requestAccessibility)))
-        menu.addItem(.separator()); menu.addItem(item("알림 고양이 종료", #selector(quit), key: "q"))
+        menu.addItem(.separator()); menu.addItem(item("알림 친구 종료", #selector(quit), key: "q"))
         statusItem.menu = menu
     }
     @objc private func toggleApp(_ sender: NSMenuItem) {
@@ -214,6 +235,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func changeSize(_ sender: NSMenuItem) {
         panel.setContentSize(NSSize(width: sender.tag, height: sender.tag)); settings.set(sender.tag, forKey: "catSize"); snapToCursor(); rebuildMenu()
     }
+    @objc private func importCharacter() {
+        guard characterPicker == nil else { characterPicker?.makeKeyAndOrderFront(nil); return }
+        let picker = NSOpenPanel()
+        picker.title = "알림 캐릭터 불러오기"; picker.prompt = "캐릭터로 사용"
+        picker.message = "SVG·PNG·JPG·GIF 또는 60초 이하 MP4·MOV를 선택해 주세요. 움직이는 파일은 소리 없이 반복 재생합니다."
+        picker.allowedContentTypes = [.svg, .png, .jpeg, .gif, .mpeg4Movie, .quickTimeMovie]; picker.allowsMultipleSelection = false; picker.canChooseDirectories = false
+        characterPicker = picker; NSApp.activate(ignoringOtherApps: true)
+        picker.begin { [weak self] response in
+            guard let self else { return }
+            defer { self.characterPicker = nil }
+            guard response == .OK, let url = picker.url else { return }
+            self.loadCharacter(url: url, copy: true, preview: true)
+        }
+    }
+    @objc private func useDefaultCharacter() {
+        characterLoadTask?.cancel()
+        cat.setMedia(image: nil); settings.set(false, forKey: "useImportedCharacter"); preview(); rebuildMenu()
+    }
+    @objc private func useImportedCharacter() {
+        guard let url = characterFiles.selectedURL else { return }
+        loadCharacter(url: url, copy: false, preview: true)
+    }
+    private func loadCharacter(url: URL, copy: Bool, preview showPreview: Bool) {
+        characterLoadTask?.cancel()
+        characterLoadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let media = try await CharacterMedia.readMedia(from: url)
+                guard !Task.isCancelled else { return }
+                if copy { try characterFiles.save(media.data, originalName: url.lastPathComponent) }
+                let playbackURL = copy ? characterFiles.selectedURL : url
+                cat.setMedia(image: media.image, videoURL: media.videoURL == nil ? nil : playbackURL, transform: media.transform)
+                settings.set(true, forKey: "useImportedCharacter")
+                if showPreview { preview() }
+                rebuildMenu()
+            } catch {
+                if !Task.isCancelled && showPreview { showCharacterError(error) }
+            }
+        }
+    }
+    private func showCharacterError(_ error: Error) {
+        let alert = NSAlert(); alert.messageText = "캐릭터를 불러올 수 없습니다"
+        alert.informativeText = error.localizedDescription; alert.addButton(withTitle: "확인")
+        NSApp.activate(ignoringOtherApps: true); alert.runModal()
+    }
+    @objc private func toggleWhiteBackground() {
+        cat.removeWhiteBackground.toggle(); settings.set(cat.removeWhiteBackground, forKey: "removeWhiteBackground")
+        preview(); rebuildMenu()
+    }
     @objc private func changeInterval(_ sender: NSMenuItem) {
         guard intervals.indices.contains(sender.tag) else { return }
         settings.set(intervals[sender.tag], forKey: "pollInterval"); startMonitoring()
@@ -229,6 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
+        characterLoadTask?.cancel(); cat.isPlaybackActive = false
         monitor.stop(); timer?.invalidate()
         for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
     }
